@@ -29,15 +29,21 @@ spec:
               value: "en"
             - name: CONCURRENT_REQUESTS
               value: "32"
+            - name: DATASET_NAME
+              value: "/tmp/dante_dataset"
             - name: RESULTS_DIR
               value: "/results"
             - name: MODEL_DIR
               value: "/mnt/models"
             - name: HF_HOME
               value: "/opt/hf_home"
+            - name: WER_SCRIPT_PATH
+              value: "/mnt/models/wer.py"
           volumeMounts:
             - name: tokenizer-volume
               mountPath: /mnt/models
+            - name: wer-script-volume
+              mountPath: /mnt/wer-script
             - name: results-volume
               mountPath: /results
             - name: shm
@@ -45,8 +51,39 @@ spec:
           command:
             - /bin/bash
             - -c
+          # Need to move the files into a location that is accessible to the user in the container
+          # Paths: /opt/hf_home/hub/datasets--D4nt3--esb-datasets-earnings22-validation-tiny-filtered/blobs/ce8ad64479c22d3c5d5bf8e952b460f6892c5df7a02f9bee2b2ecd654c2442bd -> /tmp/dante_dataset/data/validation-00000-of-00001.parquet
+          # Paths: /opt/hf_home/hub/datasets--D4nt3--esb-datasets-earnings22-validation-tiny-filtered/blobs/2491087408f3e33eb425496aeb5ecafb39984754 -> /tmp/dante_dataset/README.md
+          # These are paths within the container itself
+          # Also need to apply a certain set of changes to the dataset loading code so that the dataset is loaded as a local file instead of 
+          # attempting to download it from huggingface
           args:
             - |
+              echo $(whoami)
+              echo "Moving dataset to accessible location"
+              mkdir -p /tmp/dante_dataset/data
+              cp -r /opt/hf_home/hub/datasets--D4nt3--esb-datasets-earnings22-validation-tiny-filtered/blobs/ce8ad64479c22d3c5d5bf8e952b460f6892c5df7a02f9bee2b2ecd654c2442bd /tmp/dante_dataset/data/validation-00000-of-00001.parquet
+              cp -r /opt/hf_home/hub/datasets--D4nt3--esb-datasets-earnings22-validation-tiny-filtered/blobs/2491087408f3e33eb425496aeb5ecafb39984754 /tmp/dante_dataset/README.md
+              echo "Checking if dataset is accessible"
+              ls -la /tmp/dante_dataset/data/validation-00000-of-00001.parquet
+              ls -la /tmp/dante_dataset/README.md
+              echo "Dataset moved to accessible location"
+
+              echo "Moving the code to a location that is accessible to the user in the container"
+              mkdir -p /tmp/whisper_benchmark
+              cp -r /opt/whisper_benchmark/* /tmp/whisper_benchmark/
+              echo "Checking if code is accessible"
+              ls -la /tmp/whisper_benchmark/
+
+              echo "Updating the dataset loading code to use the environment variable DATASET_NAME"
+              sed -i 's|^DATASET_NAME = "D4nt3/esb-datasets-earnings22-validation-tiny-filtered"|DATASET_NAME = "D4nt3/esb-datasets-earnings22-validation-tiny-filtered" if os.getenv("DATASET_NAME") is None else os.getenv("DATASET_NAME")|' /tmp/whisper_benchmark/vllm_streaming_openai_client.py
+
+              echo "Updating the helpers.py code to use the new wer.py file"
+              sed -i "s|wer = evaluate.load(\"wer\")|wer = evaluate.load(\"/mnt/wer-script/wer.py\")|" /tmp/whisper_benchmark/helpers.py
+
+              echo "Checking if dataset loading code is updated"
+              cat /tmp/whisper_benchmark/vllm_streaming_openai_client.py
+              
               echo "Starting benchmark..."
               echo "Checking connectivity to $OPENAI_API_BASE_URL..."
               echo "Using model from $MODEL_DIR"
@@ -63,7 +100,7 @@ spec:
               
               echo "✓ Successfully connected to Whisper API endpoint"
               echo "Starting benchmark execution..."
-              python /opt/whisper_benchmark/vllm_streaming_openai_client.py | tee -a /results/benchmark.log
+              python /tmp/whisper_benchmark/vllm_streaming_openai_client.py | tee -a /results/benchmark.log
           resources:
             requests:
               memory: "4Gi"
@@ -72,6 +109,9 @@ spec:
               memory: "8Gi"
               cpu: "4"
       volumes:
+        - name: wer-script-volume
+          persistentVolumeClaim:
+            claimName: whisper-wer-script
         - name: tokenizer-volume
           persistentVolumeClaim:
             claimName: whisper-large-v2-cache-1
